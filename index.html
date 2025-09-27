@@ -34,23 +34,22 @@
     </label>
 
     <label class="inline" title="Snap near-black to pure black and near-white to pure white on the original, then invert.">
-      <input id="preSnap" type="checkbox" checked>
+      <input id="preSnap" type="checkbox">
       Snap extremes before invert
     </label>
     <button id="resetBtn" type="button" title="Reset thresholds to defaults">Reset thresholds</button>
   </div>
 
-  <!-- NEW: sliders -->
   <div class="sliders" aria-label="threshold controls">
     <div class="slider-row">
       <span>Near-black threshold</span>
-      <input id="lowRange" type="range" min="0" max="255" step="1" value="26">
-      <input id="lowNum" type="number" min="0" max="255" step="1" value="26" aria-label="Near-black numeric">
+      <input id="lowRange" type="range" min="0" max="255" step="1">
+      <input id="lowNum" type="number" min="0" max="255" step="1">
     </div>
     <div class="slider-row">
       <span>Near-white threshold</span>
-      <input id="highRange" type="range" min="0" max="255" step="1" value="229">
-      <input id="highNum" type="number" min="0" max="255" step="1" value="229" aria-label="Near-white numeric">
+      <input id="highRange" type="range" min="0" max="255" step="1">
+      <input id="highNum" type="number" min="0" max="255" step="1">
     </div>
   </div>
 
@@ -100,11 +99,31 @@ let originalPixels = null;
 const DEFAULT_LOW  = 26;   // ~10%
 const DEFAULT_HIGH = 229;  // ~90%
 
+// Load settings from localStorage
+function loadSettings() {
+  const savedLow = localStorage.getItem('thresholdLow');
+  const savedHigh = localStorage.getItem('thresholdHigh');
+  const savedSnap = localStorage.getItem('snapEnabled');
+  const low = savedLow !== null ? parseInt(savedLow, 10) : DEFAULT_LOW;
+  const high = savedHigh !== null ? parseInt(savedHigh, 10) : DEFAULT_HIGH;
+  setThresholds(low, high);
+  preSnap.checked = savedSnap === null ? true : savedSnap === 'true';
+}
+
+// Save thresholds + snap flag
+function saveSettings() {
+  const [low, high] = getThresholds();
+  localStorage.setItem('thresholdLow', low);
+  localStorage.setItem('thresholdHigh', high);
+  localStorage.setItem('snapEnabled', preSnap.checked);
+}
+
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
-preSnap.addEventListener('change', () => applyProcessing());
+preSnap.addEventListener('change', () => { saveSettings(); applyProcessing(); });
 resetBtn.addEventListener('click', () => {
   setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
+  saveSettings();
   applyProcessing();
 });
 
@@ -133,11 +152,9 @@ document.addEventListener('paste', async (e) => {
 
 // --- slider wiring
 function setThresholds(low, high) {
-  // clamp and ensure low <= high
   low = Math.max(0, Math.min(255, Math.round(low)));
   high = Math.max(0, Math.min(255, Math.round(high)));
   if (low > high) [low, high] = [high, low];
-
   lowRange.value = lowNum.value = low;
   highRange.value = highNum.value = high;
 }
@@ -150,21 +167,16 @@ function getThresholds() {
 
 [lowRange, lowNum, highRange, highNum].forEach(el => {
   el.addEventListener('input', () => {
-    // keep range & number paired
     if (el === lowRange) lowNum.value = lowRange.value;
     if (el === lowNum)   lowRange.value = lowNum.value;
     if (el === highRange) highNum.value = highRange.value;
     if (el === highNum)   highRange.value = highNum.value;
-
-    // enforce ordering
     const [low, high] = getThresholds();
     setThresholds(low, high);
-
+    saveSettings();
     applyProcessing();
   });
 });
-
-setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
 
 // --- load & processing
 async function handleFiles(fileList) {
@@ -182,7 +194,6 @@ async function loadBlob(blob) {
   try {
     const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
     canvas.width = bmp.width; canvas.height = bmp.height;
-
     ctx.drawImage(bmp, 0, 0);
     original.src = canvas.toDataURL('image/png');
     originalPixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -214,16 +225,14 @@ function applyProcessing() {
     const a = src[i+3];
 
     if (doSnap) {
-      // Luminance of ORIGINAL (Rec.709)
       const L = 0.2126*r + 0.7152*g + 0.0722*b;
       if (L < LOW_LUMA) {
-        r = g = b = 0;       // near-black → pure black
+        r = g = b = 0;
       } else if (L > HIGH_LUMA) {
-        r = g = b = 255;     // near-white → pure white
+        r = g = b = 255;
       }
     }
 
-    // Invert
     d[i]   = 255 - r;
     d[i+1] = 255 - g;
     d[i+2] = 255 - b;
@@ -251,6 +260,9 @@ copyBtn.addEventListener('click', async () => {
     info.textContent = 'Copy failed (browser blocked).';
   }
 });
+
+// Initialize on load
+loadSettings();
 </script>
 </body>
 </html>
