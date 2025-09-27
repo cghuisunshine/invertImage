@@ -3,14 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Invert Image (Client-Side)</title>
+<title>Invert Image</title>
 <style>
   :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   body { margin: 24px; }
-  .box {
-    border: 2px dashed #bbb; border-radius: 12px; padding: 24px; text-align: center;
-    transition: border-color .2s ease;
-  }
+  .box { border: 2px dashed #bbb; border-radius: 12px; padding: 24px; text-align: center; transition: border-color .2s; }
   .box.dragover { border-color: #333; }
   .row { display: grid; gap: 16px; grid-template-columns: 1fr; margin-top: 16px; }
   @media (min-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
@@ -19,16 +16,43 @@
   button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; cursor: pointer; }
   input[type=file] { display: none; }
   .hint { color:#666; font-size: .95rem; }
+  .controls { display:flex; gap:14px; align-items:center; justify-content:center; flex-wrap:wrap; margin-top:12px; }
+  label.inline { display:flex; gap:8px; align-items:center; cursor:pointer; user-select:none; }
+  .sliders { display:grid; gap:8px; grid-template-columns: 1fr; max-width: 700px; margin: 10px auto 0; }
+  .slider-row { display:grid; grid-template-columns: 180px 1fr 64px; gap:10px; align-items:center; }
+  .slider-row input[type=number] { width:64px; padding:6px; border:1px solid #ddd; border-radius:8px; }
 </style>
 </head>
 <body>
   <h1>Invert Image</h1>
   <p class="hint">Upload, drag & drop, or <strong>Ctrl/⌘+V</strong> paste an image.</p>
 
-  <label>
-    <button id="pickBtn">Choose image…</button>
-    <input id="fileInput" type="file" accept="image/*">
-  </label>
+  <div class="controls">
+    <label>
+      <button id="pickBtn">Choose image…</button>
+      <input id="fileInput" type="file" accept="image/*">
+    </label>
+
+    <label class="inline" title="Snap near-black to pure black and near-white to pure white on the original, then invert.">
+      <input id="preSnap" type="checkbox" checked>
+      Snap extremes before invert
+    </label>
+    <button id="resetBtn" type="button" title="Reset thresholds to defaults">Reset thresholds</button>
+  </div>
+
+  <!-- NEW: sliders -->
+  <div class="sliders" aria-label="threshold controls">
+    <div class="slider-row">
+      <span>Near-black threshold</span>
+      <input id="lowRange" type="range" min="0" max="255" step="1" value="26">
+      <input id="lowNum" type="number" min="0" max="255" step="1" value="26" aria-label="Near-black numeric">
+    </div>
+    <div class="slider-row">
+      <span>Near-white threshold</span>
+      <input id="highRange" type="range" min="0" max="255" step="1" value="229">
+      <input id="highNum" type="number" min="0" max="255" step="1" value="229" aria-label="Near-white numeric">
+    </div>
+  </div>
 
   <div id="dropZone" class="box" aria-label="drop zone">
     Drop image here or paste from clipboard
@@ -59,12 +83,30 @@ const canvas    = document.getElementById('canvas');
 const downloadBtn = document.getElementById('downloadBtn');
 const copyBtn     = document.getElementById('copyBtn');
 const info        = document.getElementById('info');
+const preSnap     = document.getElementById('preSnap');
+const resetBtn    = document.getElementById('resetBtn');
+
+const lowRange = document.getElementById('lowRange');
+const highRange = document.getElementById('highRange');
+const lowNum = document.getElementById('lowNum');
+const highNum = document.getElementById('highNum');
+
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
 let currentFileName = 'image';
+let originalPixels = null;
+
+// Defaults
+const DEFAULT_LOW  = 26;   // ~10%
+const DEFAULT_HIGH = 229;  // ~90%
 
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
+preSnap.addEventListener('change', () => applyProcessing());
+resetBtn.addEventListener('click', () => {
+  setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
+  applyProcessing();
+});
 
 ['dragenter','dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
   e.preventDefault(); e.stopPropagation(); dropZone.classList.add('dragover');
@@ -89,6 +131,42 @@ document.addEventListener('paste', async (e) => {
   }
 });
 
+// --- slider wiring
+function setThresholds(low, high) {
+  // clamp and ensure low <= high
+  low = Math.max(0, Math.min(255, Math.round(low)));
+  high = Math.max(0, Math.min(255, Math.round(high)));
+  if (low > high) [low, high] = [high, low];
+
+  lowRange.value = lowNum.value = low;
+  highRange.value = highNum.value = high;
+}
+
+function getThresholds() {
+  const low = parseInt(lowRange.value, 10);
+  const high = parseInt(highRange.value, 10);
+  return [Math.min(low, high), Math.max(low, high)];
+}
+
+[lowRange, lowNum, highRange, highNum].forEach(el => {
+  el.addEventListener('input', () => {
+    // keep range & number paired
+    if (el === lowRange) lowNum.value = lowRange.value;
+    if (el === lowNum)   lowRange.value = lowNum.value;
+    if (el === highRange) highNum.value = highRange.value;
+    if (el === highNum)   highRange.value = highNum.value;
+
+    // enforce ordering
+    const [low, high] = getThresholds();
+    setThresholds(low, high);
+
+    applyProcessing();
+  });
+});
+
+setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
+
+// --- load & processing
 async function handleFiles(fileList) {
   const file = fileList[0];
   if (!file) return;
@@ -100,40 +178,66 @@ async function loadBlob(blob) {
   info.textContent = '';
   downloadBtn.disabled = true; copyBtn.disabled = true;
   const url = URL.createObjectURL(blob);
+
   try {
-    // Use createImageBitmap for speed; it also respects EXIF orientation in most browsers.
     const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
     canvas.width = bmp.width; canvas.height = bmp.height;
+
     ctx.drawImage(bmp, 0, 0);
+    original.src = canvas.toDataURL('image/png');
+    originalPixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
     URL.revokeObjectURL(url);
 
-    // Show original preview
-    original.src = canvas.toDataURL('image/png');
-
-    // Invert pixels
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imgData.data;
-    // Invert RGB channels, preserve alpha
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]   = 255 - d[i];     // R
-      d[i+1] = 255 - d[i+1];   // G
-      d[i+2] = 255 - d[i+2];   // B
-      // d[i+3] alpha unchanged
-    }
-    ctx.putImageData(imgData, 0, 0);
+    applyProcessing();
 
     downloadBtn.disabled = false;
     copyBtn.disabled = !('ClipboardItem' in window && navigator.clipboard?.write);
-    info.textContent = `${canvas.width}×${canvas.height}px`;
   } catch (err) {
     console.error(err);
     info.textContent = 'Could not process this image.';
   }
 }
 
+// Snap on original -> invert
+function applyProcessing() {
+  if (!originalPixels) return;
+
+  const [LOW_LUMA, HIGH_LUMA] = getThresholds();
+  const w = originalPixels.width, h = originalPixels.height;
+  const src = originalPixels.data;
+  const out = ctx.createImageData(w, h);
+  const d = out.data;
+  const doSnap = preSnap.checked;
+
+  for (let i = 0; i < src.length; i += 4) {
+    let r = src[i], g = src[i+1], b = src[i+2];
+    const a = src[i+3];
+
+    if (doSnap) {
+      // Luminance of ORIGINAL (Rec.709)
+      const L = 0.2126*r + 0.7152*g + 0.0722*b;
+      if (L < LOW_LUMA) {
+        r = g = b = 0;       // near-black → pure black
+      } else if (L > HIGH_LUMA) {
+        r = g = b = 255;     // near-white → pure white
+      }
+    }
+
+    // Invert
+    d[i]   = 255 - r;
+    d[i+1] = 255 - g;
+    d[i+2] = 255 - b;
+    d[i+3] = a;
+  }
+
+  ctx.putImageData(out, 0, 0);
+  const tag = doSnap ? ` • snap[${LOW_LUMA}, ${HIGH_LUMA}]` : '';
+  info.textContent = `${w}×${h}px${tag}`;
+}
+
 downloadBtn.addEventListener('click', () => {
   const a = document.createElement('a');
-  a.href = canvas.toDataURL('image/png');       // saves as PNG (lossless)
+  a.href = canvas.toDataURL('image/png');
   a.download = `${currentFileName}-inverted.png`;
   a.click();
 });
