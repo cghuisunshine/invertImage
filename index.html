@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Invert Image (Client-Side)</title>
+<style>
+  :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  body { margin: 24px; }
+  .box {
+    border: 2px dashed #bbb; border-radius: 12px; padding: 24px; text-align: center;
+    transition: border-color .2s ease;
+  }
+  .box.dragover { border-color: #333; }
+  .row { display: grid; gap: 16px; grid-template-columns: 1fr; margin-top: 16px; }
+  @media (min-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
+  canvas, img { max-width: 100%; border-radius: 8px; background: #f6f6f6; }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 12px; }
+  button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; cursor: pointer; }
+  input[type=file] { display: none; }
+  .hint { color:#666; font-size: .95rem; }
+</style>
+</head>
+<body>
+  <h1>Invert Image</h1>
+  <p class="hint">Upload, drag & drop, or <strong>Ctrl/⌘+V</strong> paste an image.</p>
+
+  <label>
+    <button id="pickBtn">Choose image…</button>
+    <input id="fileInput" type="file" accept="image/*">
+  </label>
+
+  <div id="dropZone" class="box" aria-label="drop zone">
+    Drop image here or paste from clipboard
+  </div>
+
+  <div class="row">
+    <div>
+      <h3>Original</h3>
+      <img id="original" alt="original preview" />
+    </div>
+    <div>
+      <h3>Inverted</h3>
+      <canvas id="canvas"></canvas>
+      <div class="actions">
+        <button id="downloadBtn" disabled>Download inverted</button>
+        <button id="copyBtn" disabled>Copy to clipboard</button>
+      </div>
+      <p class="hint" id="info"></p>
+    </div>
+  </div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const dropZone  = document.getElementById('dropZone');
+const pickBtn   = document.getElementById('pickBtn');
+const original  = document.getElementById('original');
+const canvas    = document.getElementById('canvas');
+const downloadBtn = document.getElementById('downloadBtn');
+const copyBtn     = document.getElementById('copyBtn');
+const info        = document.getElementById('info');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let currentFileName = 'image';
+
+pickBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+['dragenter','dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); e.stopPropagation(); dropZone.classList.add('dragover');
+}));
+['dragleave','drop'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); e.stopPropagation(); dropZone.classList.remove('dragover');
+}));
+dropZone.addEventListener('drop', e => {
+  const files = e.dataTransfer.files;
+  if (files && files.length) handleFiles(files);
+});
+
+document.addEventListener('paste', async (e) => {
+  const items = e.clipboardData?.items || [];
+  for (const it of items) {
+    if (it.type.startsWith('image/')) {
+      const blob = it.getAsFile();
+      currentFileName = 'pasted';
+      await loadBlob(blob);
+      break;
+    }
+  }
+});
+
+async function handleFiles(fileList) {
+  const file = fileList[0];
+  if (!file) return;
+  currentFileName = file.name.replace(/\.[^.]+$/, '') || 'image';
+  await loadBlob(file);
+}
+
+async function loadBlob(blob) {
+  info.textContent = '';
+  downloadBtn.disabled = true; copyBtn.disabled = true;
+  const url = URL.createObjectURL(blob);
+  try {
+    // Use createImageBitmap for speed; it also respects EXIF orientation in most browsers.
+    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    canvas.width = bmp.width; canvas.height = bmp.height;
+    ctx.drawImage(bmp, 0, 0);
+    URL.revokeObjectURL(url);
+
+    // Show original preview
+    original.src = canvas.toDataURL('image/png');
+
+    // Invert pixels
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imgData.data;
+    // Invert RGB channels, preserve alpha
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]   = 255 - d[i];     // R
+      d[i+1] = 255 - d[i+1];   // G
+      d[i+2] = 255 - d[i+2];   // B
+      // d[i+3] alpha unchanged
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    downloadBtn.disabled = false;
+    copyBtn.disabled = !('ClipboardItem' in window && navigator.clipboard?.write);
+    info.textContent = `${canvas.width}×${canvas.height}px`;
+  } catch (err) {
+    console.error(err);
+    info.textContent = 'Could not process this image.';
+  }
+}
+
+downloadBtn.addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');       // saves as PNG (lossless)
+  a.download = `${currentFileName}-inverted.png`;
+  a.click();
+});
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    info.textContent = 'Copied to clipboard ✔';
+  } catch {
+    info.textContent = 'Copy failed (browser blocked).';
+  }
+});
+</script>
+</body>
+</html>
+
