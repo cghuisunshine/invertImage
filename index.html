@@ -37,6 +37,13 @@
       <input id="preSnap" type="checkbox">
       Snap extremes before invert
     </label>
+
+    <!-- NEW: Rotate 180° toggle -->
+    <label class="inline" title="Rotate the RESULT image by 180° after inverting.">
+      <input id="rotate180" type="checkbox">
+      Rotate 180°
+    </label>
+
     <button id="resetBtn" type="button" title="Reset thresholds to defaults">Reset thresholds</button>
   </div>
 
@@ -83,6 +90,7 @@ const downloadBtn = document.getElementById('downloadBtn');
 const copyBtn     = document.getElementById('copyBtn');
 const info        = document.getElementById('info');
 const preSnap     = document.getElementById('preSnap');
+const rotate180   = document.getElementById('rotate180'); // NEW
 const resetBtn    = document.getElementById('resetBtn');
 
 const lowRange = document.getElementById('lowRange');
@@ -104,23 +112,27 @@ function loadSettings() {
   const savedLow = localStorage.getItem('thresholdLow');
   const savedHigh = localStorage.getItem('thresholdHigh');
   const savedSnap = localStorage.getItem('snapEnabled');
+  const savedRotate = localStorage.getItem('rotateEnabled'); // NEW
   const low = savedLow !== null ? parseInt(savedLow, 10) : DEFAULT_LOW;
   const high = savedHigh !== null ? parseInt(savedHigh, 10) : DEFAULT_HIGH;
   setThresholds(low, high);
   preSnap.checked = savedSnap === null ? true : savedSnap === 'true';
+  rotate180.checked = savedRotate === 'true'; // default off
 }
 
-// Save thresholds + snap flag
+// Save thresholds + flags
 function saveSettings() {
   const [low, high] = getThresholds();
   localStorage.setItem('thresholdLow', low);
   localStorage.setItem('thresholdHigh', high);
   localStorage.setItem('snapEnabled', preSnap.checked);
+  localStorage.setItem('rotateEnabled', rotate180.checked); // NEW
 }
 
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 preSnap.addEventListener('change', () => { saveSettings(); applyProcessing(); });
+rotate180.addEventListener('change', () => { saveSettings(); applyProcessing(); }); // NEW
 resetBtn.addEventListener('click', () => {
   setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
   saveSettings();
@@ -209,13 +221,15 @@ async function loadBlob(blob) {
   }
 }
 
-// Snap on original -> invert
+// Snap on original -> invert -> (optional) rotate 180° on result
 function applyProcessing() {
   if (!originalPixels) return;
 
   const [LOW_LUMA, HIGH_LUMA] = getThresholds();
   const w = originalPixels.width, h = originalPixels.height;
   const src = originalPixels.data;
+
+  // Build inverted pixels first
   const out = ctx.createImageData(w, h);
   const d = out.data;
   const doSnap = preSnap.checked;
@@ -239,9 +253,29 @@ function applyProcessing() {
     d[i+3] = a;
   }
 
-  ctx.putImageData(out, 0, 0);
-  const tag = doSnap ? ` • snap[${LOW_LUMA}, ${HIGH_LUMA}]` : '';
-  info.textContent = `${w}×${h}px${tag}`;
+  // Draw result, with optional 180° rotation
+  ctx.setTransform(1, 0, 0, 1, 0, 0); // reset any prior transform
+  ctx.clearRect(0, 0, w, h);
+
+  if (rotate180.checked) {
+    // Put pixels to a temporary canvas, then draw rotated onto main canvas
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d');
+    tctx.putImageData(out, 0, 0);
+
+    ctx.save();
+    ctx.translate(w, h);
+    ctx.rotate(Math.PI); // 180°
+    ctx.drawImage(tmp, 0, 0);
+    ctx.restore();
+  } else {
+    ctx.putImageData(out, 0, 0);
+  }
+
+  const snapTag = doSnap ? ` • snap[${LOW_LUMA}, ${HIGH_LUMA}]` : '';
+  const rotTag = rotate180.checked ? ' • rotated 180°' : '';
+  info.textContent = `${w}×${h}px${snapTag}${rotTag}`;
 }
 
 downloadBtn.addEventListener('click', () => {
