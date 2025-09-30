@@ -21,7 +21,6 @@
   .sliders { display:grid; gap:8px; grid-template-columns: 1fr; max-width: 700px; margin: 10px auto 0; }
   .slider-row { display:grid; grid-template-columns: 180px 1fr 64px; gap:10px; align-items:center; }
   .slider-row input[type=number] { width:64px; padding:6px; border:1px solid #ddd; border-radius:8px; }
-  /* NEW: subtle disabled look for controls */
   .disabled { opacity:.6; pointer-events:none; }
 </style>
 </head>
@@ -32,10 +31,10 @@
   <div class="controls">
     <label>
       <button id="pickBtn">Choose image…</button>
-      <input id="fileInput" type="file" accept="image/*">
+      <!-- accept now includes HEIC/HEIF -->
+      <input id="fileInput" type="file" accept="image/*,.heic,.heif">
     </label>
 
-    <!-- NEW: Invert toggle (default on) -->
     <label class="inline" title="Invert the image colors. Disable to show the original (rotation still applies).">
       <input id="enableInvert" type="checkbox" checked>
       Invert colors
@@ -46,7 +45,6 @@
       Snap extremes before invert
     </label>
 
-    <!-- Rotate 180° toggle -->
     <label class="inline" title="Rotate the RESULT image by 180° after processing.">
       <input id="rotate180" type="checkbox">
       Rotate 180°
@@ -97,7 +95,7 @@ const canvas    = document.getElementById('canvas');
 const downloadBtn = document.getElementById('downloadBtn');
 const copyBtn     = document.getElementById('copyBtn');
 const info        = document.getElementById('info');
-const enableInvert = document.getElementById('enableInvert'); // NEW
+const enableInvert = document.getElementById('enableInvert');
 const preSnap     = document.getElementById('preSnap');
 const rotate180   = document.getElementById('rotate180');
 const resetBtn    = document.getElementById('resetBtn');
@@ -106,39 +104,38 @@ const lowRange = document.getElementById('lowRange');
 const highRange = document.getElementById('highRange');
 const lowNum = document.getElementById('lowNum');
 const highNum = document.getElementById('highNum');
-const slidersWrap = document.getElementById('slidersWrap'); // NEW
+const slidersWrap = document.getElementById('slidersWrap');
 
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
 let currentFileName = 'image';
 let originalPixels = null;
+let sourceWasHeic = false; // NEW
 
 // Defaults
 const DEFAULT_LOW  = 26;   // ~10%
 const DEFAULT_HIGH = 229;  // ~90%
 
-// Load settings from localStorage
 function loadSettings() {
   const savedLow = localStorage.getItem('thresholdLow');
   const savedHigh = localStorage.getItem('thresholdHigh');
   const savedSnap = localStorage.getItem('snapEnabled');
   const savedRotate = localStorage.getItem('rotateEnabled');
-  const savedInvert = localStorage.getItem('invertEnabled'); // NEW
+  const savedInvert = localStorage.getItem('invertEnabled');
   const low = savedLow !== null ? parseInt(savedLow, 10) : DEFAULT_LOW;
   const high = savedHigh !== null ? parseInt(savedHigh, 10) : DEFAULT_HIGH;
   setThresholds(low, high);
-  enableInvert.checked = savedInvert === null ? true : savedInvert === 'true'; // default ON
+  enableInvert.checked = savedInvert === null ? true : savedInvert === 'true';
   preSnap.checked = savedSnap === null ? true : savedSnap === 'true';
-  rotate180.checked = savedRotate === 'true'; // default off
-  updateDisabledState(); // NEW
+  rotate180.checked = savedRotate === 'true';
+  updateDisabledState();
 }
 
-// Save thresholds + flags
 function saveSettings() {
   const [low, high] = getThresholds();
   localStorage.setItem('thresholdLow', low);
   localStorage.setItem('thresholdHigh', high);
-  localStorage.setItem('invertEnabled', enableInvert.checked); // NEW
+  localStorage.setItem('invertEnabled', enableInvert.checked);
   localStorage.setItem('snapEnabled', preSnap.checked);
   localStorage.setItem('rotateEnabled', rotate180.checked);
 }
@@ -146,19 +143,10 @@ function saveSettings() {
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
-enableInvert.addEventListener('change', () => { // NEW
-  updateDisabledState();
-  saveSettings();
-  applyProcessing();
-});
-
+enableInvert.addEventListener('change', () => { updateDisabledState(); saveSettings(); applyProcessing(); });
 preSnap.addEventListener('change', () => { saveSettings(); applyProcessing(); });
 rotate180.addEventListener('change', () => { saveSettings(); applyProcessing(); });
-resetBtn.addEventListener('click', () => {
-  setThresholds(DEFAULT_LOW, DEFAULT_HIGH);
-  saveSettings();
-  applyProcessing();
-});
+resetBtn.addEventListener('click', () => { setThresholds(DEFAULT_LOW, DEFAULT_HIGH); saveSettings(); applyProcessing(); });
 
 ['dragenter','dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
   e.preventDefault(); e.stopPropagation(); dropZone.classList.add('dragover');
@@ -177,7 +165,7 @@ document.addEventListener('paste', async (e) => {
     if (it.type.startsWith('image/')) {
       const blob = it.getAsFile();
       currentFileName = 'pasted';
-      await loadBlob(blob);
+      await loadAnyImageBlob(blob, /*filenameHint*/'pasted');
       break;
     }
   }
@@ -211,7 +199,6 @@ function getThresholds() {
   });
 });
 
-// NEW: enable/disable controls that are irrelevant when not inverting
 function updateDisabledState() {
   const on = enableInvert.checked;
   preSnap.disabled = !on;
@@ -221,34 +208,76 @@ function updateDisabledState() {
   slidersWrap.classList.toggle('disabled', !on);
 }
 
-// --- load & processing
+// ===== HEIC SUPPORT =====
+
+// lightweight loader for heic2any only when needed
+async function ensureHeicDecoder() {
+  if (window.heic2any) return window.heic2any;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load HEIC decoder.'));
+    document.head.appendChild(s);
+  });
+  if (!window.heic2any) throw new Error('HEIC decoder unavailable.');
+  return window.heic2any;
+}
+
+function looksLikeHeic(file, filenameHint = '') {
+  const t = (file.type || '').toLowerCase();
+  const n = (file.name || filenameHint || '').toLowerCase();
+  return t === 'image/heic' || t === 'image/heif' || n.endsWith('.heic') || n.endsWith('.heif');
+}
+
 async function handleFiles(fileList) {
   const file = fileList[0];
   if (!file) return;
-  currentFileName = file.name.replace(/\.[^.]+$/, '') || 'image';
-  await loadBlob(file);
+  const base = file.name ? file.name.replace(/\.[^.]+$/, '') : 'image';
+  currentFileName = base || 'image';
+  await loadAnyImageBlob(file, file.name);
 }
 
-async function loadBlob(blob) {
+async function loadAnyImageBlob(fileOrBlob, filenameHint='') {
   info.textContent = '';
   downloadBtn.disabled = true; copyBtn.disabled = true;
-  const url = URL.createObjectURL(blob);
 
   try {
-    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-    canvas.width = bmp.width; canvas.height = bmp.height;
-    ctx.drawImage(bmp, 0, 0);
-    original.src = canvas.toDataURL('image/png');
-    originalPixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
+    let blob = fileOrBlob;
+    sourceWasHeic = false;
 
-    applyProcessing();
+    if (blob instanceof File && looksLikeHeic(blob, filenameHint)) {
+      // Decode to PNG first
+      const heic2any = await ensureHeicDecoder();
+      const out = await heic2any({ blob, toType: 'image/png' });
+      // heic2any may return a Blob or an array of Blobs (for HEIC sequences/live photos)
+      blob = Array.isArray(out) ? out[0] : out;
+      sourceWasHeic = true;
+    }
 
+    await loadBlobAsDrawable(blob);
     downloadBtn.disabled = false;
     copyBtn.disabled = !('ClipboardItem' in window && navigator.clipboard?.write);
   } catch (err) {
     console.error(err);
     info.textContent = 'Could not process this image.';
+  }
+}
+
+// Draw any (already-compatible) blob onto canvas and keep originalPixels
+async function loadBlobAsDrawable(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    canvas.width = bmp.width; canvas.height = bmp.height;
+    const tmpctx = canvas.getContext('2d');
+    tmpctx.drawImage(bmp, 0, 0);
+    original.src = canvas.toDataURL('image/png');
+    originalPixels = tmpctx.getImageData(0, 0, canvas.width, canvas.height);
+    applyProcessing();
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -261,7 +290,6 @@ function applyProcessing() {
   const doInvert = enableInvert.checked;
   const doSnap = preSnap.checked && doInvert;
 
-  // Prepare an ImageData to draw (either inverted or original pass-through)
   let out;
 
   if (doInvert) {
@@ -288,14 +316,9 @@ function applyProcessing() {
       d[i+3] = a;
     }
   } else {
-    // No invert: just use the original pixels
-    out = new ImageData(
-      new Uint8ClampedArray(originalPixels.data), // clone to avoid mutating source
-      w, h
-    );
+    out = new ImageData(new Uint8ClampedArray(originalPixels.data), w, h);
   }
 
-  // Draw result with optional 180° rotation
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
 
@@ -317,13 +340,16 @@ function applyProcessing() {
   const invertTag = doInvert ? ' • inverted' : ' • no invert';
   const snapTag = doSnap ? ` • snap[${LOW_LUMA}, ${HIGH_LUMA}]` : '';
   const rotTag = rotate180.checked ? ' • rotated 180°' : '';
-  info.textContent = `${w}×${h}px${invertTag}${snapTag}${rotTag}`;
+  const heicTag = sourceWasHeic ? ' • source: HEIC' : '';
+  info.textContent = `${w}×${h}px${invertTag}${snapTag}${rotTag}${heicTag}`;
 }
 
 downloadBtn.addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = canvas.toDataURL('image/png');
-  a.download = `${currentFileName}-${enableInvert.checked ? 'inverted' : 'original'}.png`;
+  // If source was HEIC or user wants PNG output, force .png (your pipeline is PNG anyway)
+  const name = `${currentFileName}-${enableInvert.checked ? 'inverted' : 'original'}.png`;
+  a.download = name;
   a.click();
 });
 
@@ -337,7 +363,6 @@ copyBtn.addEventListener('click', async () => {
   }
 });
 
-// Initialize on load
 loadSettings();
 </script>
 </body>
